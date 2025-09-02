@@ -147,7 +147,7 @@ c4.metric("Total Funding (₱)", f"{fdf['funding_num'].sum():,.0f}")
 # =========================
 # Insights (auto-narrative)
 # =========================
-with st.expander("🔎 Quick Insights"):
+with st.expander(" Quick Insights"):
     lines = []
     # Funding concentration among agencies
     if "implementing_agency" in fdf and not fdf.empty:
@@ -181,12 +181,12 @@ with st.expander("🔎 Quick Insights"):
 # Visualizations
 # =========================
 tabs = st.tabs([
-    "📈 Projects & Funding by Year",
-    "💰 Funding by KRA",
-    "🏛️ Agencies (Pareto)",
-    "👥 Beneficiaries",
-    "🟦 Status Distribution",
-    "📅 Project Timeline (Gantt)"
+    " Projects & Funding by Year",
+    " Funding by KRA",
+    " Agencies ",
+    " Beneficiaries",
+    " Status Distribution",
+    " Project Timeline "
 ])
 
 # 1) Projects & Funding by Year (dual-layer)
