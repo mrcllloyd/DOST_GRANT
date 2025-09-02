@@ -11,11 +11,11 @@ import streamlit as st
 # ----------------------
 st.set_page_config(
     page_title="DOST Grants-in-Aid (GIA) Dashboard",
-    page_icon="⚛️",
+    page_icon="⚛️",   # Atom icon
     layout="wide",
 )
 
-# (Optional) remove Streamlit chrome for a cleaner look
+# (Optional) streamlined chrome
 st.markdown(
     """
     <style>
@@ -46,11 +46,9 @@ EXPECTED_KEYS = {
 }
 
 def _slug(s: str) -> str:
-    """Lowercase, collapse spaces."""
     return re.sub(r"\s+", " ", str(s or "")).strip().lower()
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Map raw columns to canonical names using EXPECTED_KEYS. Fallback: snake_case of header."""
     col_map = {}
     for raw in df.columns:
         mapped = False
@@ -64,7 +62,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=col_map)
 
 def parse_money(x):
-    """Parse peso strings like '₱1,234,567.89' → float."""
     if pd.isna(x):
         return np.nan
     s = re.sub(r"[₱,]", "", str(x))
@@ -72,19 +69,12 @@ def parse_money(x):
     return float(m.group(0)) if m else np.nan
 
 def to_date(x):
-    """Best-effort date coercion."""
     if pd.isna(x) or str(x).strip() == "":
         return pd.NaT
     return pd.to_datetime(x, errors="coerce")
 
 @st.cache_data(show_spinner=True)
 def load_data(path: str | None = None) -> pd.DataFrame:
-    """
-    Load Excel dataset with fallback order:
-      1) explicit path (sidebar)
-      2) env STREAMLIT_DOST_GIA_PATH
-      3) data/dost_gia.xlsx
-    """
     candidates = []
     if path:
         candidates.append(path)
@@ -117,6 +107,18 @@ def load_data(path: str | None = None) -> pd.DataFrame:
             ]:
                 if c in df:
                     df[c] = df[c].astype(str).replace({"nan": ""})
+
+            # computed duration (in days) for timeline viz
+            if "start_dt" in df and "end_dt" in df:
+                df["duration_days"] = (df["end_dt"] - df["start_dt"]).dt.days
+
+            # unified funding column for charts
+            if "total_cost_num" in df and df["total_cost_num"].notna().any():
+                df["funding_num"] = df["total_cost_num"]
+            elif "pcaarrd_2024_num" in df and df["pcaarrd_2024_num"].notna().any():
+                df["funding_num"] = df["pcaarrd_2024_num"]
+            else:
+                df["funding_num"] = np.nan
 
             return df
         except Exception as e:
@@ -177,32 +179,30 @@ if search_q.strip():
         sub = df[cols].astype(str).apply(lambda s: s.str.contains(pat))
         mask &= sub.any(axis=1)
 
-if show_only_funded:
-    money_col = "total_cost_num" if "total_cost_num" in df.columns else ("pcaarrd_2024_num" if "pcaarrd_2024_num" in df.columns else None)
-    if money_col:
-        mask &= df[money_col].fillna(0) > 0
+if show_only_funded and "funding_num" in df.columns:
+    mask &= df["funding_num"].fillna(0) > 0
 
 fdf = df[mask].copy()
 
 # ----------------------
 # Header & KPIs
 # ----------------------
-st.title("📊 DOST Grants-in-Aid (GIA) Dashboard")
+st.title("⚛️ DOST Grants-in-Aid (GIA) Dashboard")
 st.caption("Interactive overview of programs, projects, beneficiaries, and funding.")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Projects", f"{len(fdf):,}")
 c2.metric("Beneficiaries (unique)", f"{fdf.get('beneficiaries', pd.Series(dtype=str)).dropna().nunique():,}")
 c3.metric("Implementing Agencies", f"{fdf.get('implementing_agency', pd.Series(dtype=str)).dropna().nunique():,}")
-total_cost_sum = fdf.get("total_cost_num", pd.Series([0.0])).fillna(0.0).sum()
-c4.metric("Total Cost (₱)", f"{total_cost_sum:,.0f}" if total_cost_sum else "—")
+total_cost_sum = fdf.get("funding_num", pd.Series([0.0])).fillna(0.0).sum()
+c4.metric("Total Funding (₱)", f"{total_cost_sum:,.0f}" if total_cost_sum else "—")
 
 # ----------------------
-# Charts
+# Core Charts
 # ----------------------
-tabs = st.tabs(["Projects by Year", "Funding by KRA", "Top Beneficiaries"])
+core_tabs = st.tabs(["Projects by Year", "Funding by KRA", "Top Beneficiaries"])
 
-with tabs[0]:
+with core_tabs[0]:
     if "year_start" in fdf.columns:
         by_year = (
             fdf.groupby("year_start", dropna=False)
@@ -221,30 +221,26 @@ with tabs[0]:
     else:
         st.info("No 'Start' year information available to chart.")
 
-with tabs[1]:
-    if "kra" in fdf.columns:
-        money_col = "total_cost_num" if "total_cost_num" in fdf.columns else ("pcaarrd_2024_num" if "pcaarrd_2024_num" in fdf.columns else None)
-        if money_col:
-            kdf = (
-                fdf.groupby("kra", dropna=False)[money_col]
-                   .sum()
-                   .reset_index()
-            )
-            kdf[money_col] = kdf[money_col].fillna(0)
-            st.altair_chart(
-                alt.Chart(kdf).mark_bar().encode(
-                    x=alt.X("kra:N", sort="-y", title="KRA"),
-                    y=alt.Y(f"{money_col}:Q", title="₱"),
-                    tooltip=["kra:N", alt.Tooltip(f"{money_col}:Q", format=",.0f", title="Amount (₱)")]
-                ).properties(height=300),
-                use_container_width=True
-            )
-        else:
-            st.info("No funding column found (Total Project Cost or 2024 PCAARRD GIA).")
+with core_tabs[1]:
+    if "kra" in fdf.columns and "funding_num" in fdf.columns:
+        kdf = (
+            fdf.groupby("kra", dropna=False)["funding_num"]
+               .sum()
+               .reset_index()
+        )
+        kdf["funding_num"] = kdf["funding_num"].fillna(0)
+        st.altair_chart(
+            alt.Chart(kdf).mark_bar().encode(
+                x=alt.X("kra:N", sort="-y", title="KRA"),
+                y=alt.Y("funding_num:Q", title="₱"),
+                tooltip=["kra:N", alt.Tooltip("funding_num:Q", format=",.0f", title="Amount (₱)")]
+            ).properties(height=300),
+            use_container_width=True
+        )
     else:
-        st.info("No KRA column available.")
+        st.info("Need KRA and funding columns to render this chart.")
 
-with tabs[2]:
+with core_tabs[2]:
     if "beneficiaries" in fdf.columns:
         vals = fdf["beneficiaries"].dropna().astype(str)
         exploded = []
@@ -269,6 +265,115 @@ with tabs[2]:
         st.info("No Beneficiaries column available.")
 
 # ----------------------
+# Insightful Visualizations
+# ----------------------
+st.subheader("🔎 Insightful Visualizations")
+viz_tabs = st.tabs([
+    "Project Timeline (Gantt-style)",
+    "KRA × Year Heatmap",
+    "Agency Pareto (80/20 View)",
+    "Funding Distribution by KRA"
+])
+
+# 1) Project Timeline (Gantt-style)
+with viz_tabs[0]:
+    if {"project_title","start_dt","end_dt"}.issubset(fdf.columns):
+        # Focus on projects with both dates
+        tdf = fdf.dropna(subset=["start_dt","end_dt"]).copy()
+        # Limit rows for readability (toggleable)
+        max_rows = st.slider("Max projects to display", 50, 1000, 200, step=50)
+        tdf = tdf.sort_values("start_dt").head(max_rows)
+        tooltip_cols = [c for c in ["project_title","program_title","implementing_agency","kra","start_dt","end_dt","funding_num","status"] if c in tdf.columns]
+
+        chart = alt.Chart(tdf).mark_bar().encode(
+            x=alt.X("start_dt:T", title="Start"),
+            x2=alt.X2("end_dt:T", title="End"),
+            y=alt.Y("project_title:N", sort="-x", title=None),
+            color=alt.Color("kra:N", legend=alt.Legend(title="KRA")) if "kra" in tdf.columns else alt.value("#888"),
+            tooltip=tooltip_cols
+        ).properties(height=min(28*len(tdf), 700))
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.info("Need `project_title`, `start`, and `end` columns to draw the timeline.")
+
+# 2) KRA × Year Heatmap (funding intensity over time)
+with viz_tabs[1]:
+    if {"kra","year_start","funding_num"}.issubset(fdf.columns):
+        hdf = (
+            fdf.dropna(subset=["kra","year_start"])
+               .groupby(["kra","year_start"], dropna=False)["funding_num"]
+               .sum()
+               .reset_index()
+        )
+        st.altair_chart(
+            alt.Chart(hdf).mark_rect().encode(
+                x=alt.X("year_start:O", title="Start Year"),
+                y=alt.Y("kra:N", title="KRA"),
+                color=alt.Color("funding_num:Q", title="₱", scale=alt.Scale(type="linear")),
+                tooltip=[alt.Tooltip("kra:N"), alt.Tooltip("year_start:O"), alt.Tooltip("funding_num:Q", format=",.0f", title="Amount (₱)")]
+            ).properties(height=300),
+            use_container_width=True
+        )
+    else:
+        st.info("Need KRA, Start Year, and funding to render heatmap.")
+
+# 3) Agency Pareto (bar + cumulative line)
+with viz_tabs[2]:
+    if {"implementing_agency","funding_num"}.issubset(fdf.columns):
+        adf = (
+            fdf.dropna(subset=["implementing_agency"])
+               .groupby("implementing_agency", dropna=False)["funding_num"]
+               .sum()
+               .reset_index()
+               .sort_values("funding_num", ascending=False)
+        )
+        adf["funding_num"] = adf["funding_num"].fillna(0)
+        adf["rank"] = np.arange(1, len(adf)+1)
+        total = adf["funding_num"].sum()
+        adf["cum_share"] = (adf["funding_num"].cumsum() / total * 100) if total else 0
+        top_n = st.slider("Show top N agencies", 5, min(50, len(adf)), min(15, len(adf)))
+        view = adf.head(top_n)
+
+        bars = alt.Chart(view).mark_bar().encode(
+            x=alt.X("implementing_agency:N", sort="-y", title="Implementing Agency"),
+            y=alt.Y("funding_num:Q", title="₱"),
+            tooltip=[alt.Tooltip("implementing_agency:N", title="Agency"),
+                     alt.Tooltip("funding_num:Q", title="Amount (₱)", format=",.0f")]
+        )
+        line = alt.Chart(view).mark_line(point=True).encode(
+            x=alt.X("implementing_agency:N", sort="-y"),
+            y=alt.Y("cum_share:Q", axis=alt.Axis(title="Cumulative %", grid=False)),
+            tooltip=[alt.Tooltip("cum_share:Q", title="Cum %", format=".1f")]
+        )
+        st.altair_chart(alt.layer(bars, line).resolve_scale(y='independent').properties(height=380), use_container_width=True)
+        if len(adf):
+            eighty_cut = (adf["cum_share"] >= 80).idxmax() if total else None
+            if total and pd.notna(eighty_cut):
+                cutoff_rank = int(adf.loc[eighty_cut, "rank"])
+                st.caption(f"Approx. **Top {cutoff_rank} agencies** account for **~80%** of total funding.")
+    else:
+        st.info("Need Implementing Agency and funding to render Pareto.")
+
+# 4) Funding Distribution by KRA (boxplot)
+with viz_tabs[3]:
+    if {"kra","funding_num"}.issubset(fdf.columns):
+        bdf = fdf.dropna(subset=["kra","funding_num"]).copy()
+        if len(bdf):
+            st.altair_chart(
+                alt.Chart(bdf).mark_boxplot().encode(
+                    x=alt.X("kra:N", title="KRA"),
+                    y=alt.Y("funding_num:Q", title="Funding (₱)"),
+                    tooltip=[alt.Tooltip("kra:N"), alt.Tooltip("funding_num:Q", format=",.0f")]
+                ).properties(height=350),
+                use_container_width=True
+            )
+            st.caption("Boxplot shows median, quartiles, and outliers per KRA to reveal dispersion and high-value projects.")
+        else:
+            st.info("No rows with both KRA and numeric funding.")
+    else:
+        st.info("Need KRA and funding to render distribution.")
+
+# ----------------------
 # Data Explorer
 # ----------------------
 st.subheader("Data Explorer")
@@ -276,8 +381,8 @@ st.caption("Browse and download the filtered records.")
 
 show_cols = [c for c in [
     "program_title","project_title","kra","implementing_agency","beneficiaries",
-    "start","end","status","total_cost","pcaarrd_2024","total_cost_num","pcaarrd_2024_num",
-    "year_start","year_end","description","expected_output"
+    "start","end","status","total_cost","pcaarrd_2024","funding_num","total_cost_num","pcaarrd_2024_num",
+    "year_start","year_end","description","expected_output","duration_days"
 ] if c in fdf.columns]
 
 st.dataframe(fdf[show_cols], use_container_width=True, hide_index=True)
@@ -296,7 +401,7 @@ with st.expander("About this dashboard"):
     st.markdown("""
 **Purpose.** Explore the DOST GIA portfolio—projects, beneficiaries, KRAs, timelines, and funding—interactively.
 
-**How to use.** Filter by year, KRA, agency, or text search. Toggle **Only projects with ₱ amount** to focus on entries with peso values.
+**How to use.** Filter by year, KRA, agency, or text search. Toggle **Only projects with ₱ amount** to focus on entries with numeric funding.
 
-**Data path.** Default is `data/dost_gia.xlsx`. You can override via the `STREAMLIT_DOST_GIA_PATH` environment variable or the sidebar input box.
+**Data path.** Default is `data/dost_gia.xlsx`. Override via `STREAMLIT_DOST_GIA_PATH` or the sidebar input.
 """)
