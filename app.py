@@ -11,7 +11,7 @@ import streamlit as st
 # ----------------------
 st.set_page_config(
     page_title="DOST Grants-in-Aid (GIA) Dashboard",
-    page_icon="⚛️",   # Atom icon
+    page_icon="⚛️",
     layout="wide",
 )
 
@@ -42,9 +42,9 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "beneficiaries": ["beneficiaries"],
         "start": ["start", "start date"],
         "end": ["end", "end date"],
-        "status": ["status"],
-        "total_cost": ["total project cost"],
-        "pcaarrd_2024": ["2024 pcaarrd gia"],
+        "status": ["status", "status 'as of december 31, 2024'"],
+        "total_project_cost": ["total project cost", "total cost", "project cost"],
+        "year": ["year"],
     }
     for raw in df.columns:
         mapped = False
@@ -67,49 +67,82 @@ def to_date(x):
     if pd.isna(x) or str(x).strip()=="" : return pd.NaT
     return pd.to_datetime(x, errors="coerce")
 
+def first_present(*series):
+    """Return the first non-null series among inputs."""
+    for s in series:
+        if s is not None and hasattr(s, "notna") and s.notna().any():
+            return s
+    return None
+
 @st.cache_data(show_spinner=True)
 def load_data():
-    # fixed path inside repo
+    # Fixed path inside repo
     path = "data/dost_gia.xlsx"
     df = pd.read_excel(path).copy()
     df = normalize_columns(df)
 
-    if "total_cost" in df:
-        df["funding_num"] = df["total_cost"].apply(parse_money)
-    elif "pcaarrd_2024" in df:
-        df["funding_num"] = df["pcaarrd_2024"].apply(parse_money)
-    else:
-        df["funding_num"] = np.nan
-
+    # Dates
     if "start" in df:
         df["start_dt"] = df["start"].apply(to_date)
     if "end" in df:
         df["end_dt"] = df["end"].apply(to_date)
 
-    # Year column
-    if "start_dt" in df and df["start_dt"].notna().any():
-        df["year"] = df["start_dt"].dt.year
-    elif "end_dt" in df and df["end_dt"].notna().any():
-        df["year"] = df["end_dt"].dt.year
+    # Derive a robust 'year' column:
+    # Priority: explicit 'year' column → start year → end year
+    year_explicit = pd.to_numeric(df.get("year"), errors="coerce") if "year" in df else None
+    start_year = df["start_dt"].dt.year if "start_dt" in df else None
+    end_year = df["end_dt"].dt.year if "end_dt" in df else None
+    year_choice = first_present(year_explicit, start_year, end_year)
+    df["year"] = year_choice if year_choice is not None else np.nan
+
+    # Funding detection:
+    # 1) total_project_cost if present
+    # 2) any column containing "PCAARRD GIA"
+    funding = None
+    if "total_project_cost" in df:
+        funding = df["total_project_cost"].apply(parse_money)
     else:
-        df["year"] = np.nan
+        # find any PCAARRD GIA column (e.g., "2016 PCAARRD GIA")
+        gia_cols = [c for c in df.columns if re.search(r"pcaarrd\s*gia", c, flags=re.I)]
+        if gia_cols:
+            # Sum across any found GIA columns after parsing numeric
+            tmp = pd.DataFrame({c: df[c].apply(parse_money) for c in gia_cols})
+            funding = tmp.sum(axis=1)
+    if funding is None:
+        funding = pd.Series(np.nan, index=df.index)
+
+    df["funding_num"] = funding.fillna(0)
+
+    # Duration (optional, used by Gantt)
+    if {"start_dt", "end_dt"}.issubset(df.columns):
+        df["duration_days"] = (df["end_dt"] - df["start_dt"]).dt.days
 
     return df
 
 # ----------------------
-# Sidebar (Year filter only)
+# Load
 # ----------------------
-st.sidebar.title("Filter")
 df = load_data()
 
-min_year = int(df["year"].min()) if df["year"].notna().any() else 2000
-max_year = int(df["year"].max()) if df["year"].notna().any() else 2030
+# Compute actual data year bounds
+valid_years = pd.to_numeric(df["year"], errors="coerce").dropna().astype(int)
+data_min = int(valid_years.min()) if not valid_years.empty else 2016
+data_max = int(valid_years.max()) if not valid_years.empty else 2024
 
+# Force UI slider to 2016–2024 window, intersected with actual data
+UI_MIN, UI_MAX = 2016, 2024
+min_year = max(UI_MIN, data_min)
+max_year = min(UI_MAX, max(data_max, UI_MIN))  # ensure at least UI_MIN
+
+# ----------------------
+# Sidebar (Year only)
+# ----------------------
+st.sidebar.title("Filter")
 year_range = st.sidebar.slider(
     "Year",
     min_value=min_year,
     max_value=max_year,
-    value=(min_year,max_year)
+    value=(min_year, max_year)
 )
 
 mask = (df["year"].fillna(min_year) >= year_range[0]) & (df["year"].fillna(max_year) <= year_range[1])
@@ -119,7 +152,7 @@ fdf = df[mask].copy()
 # KPIs
 # ----------------------
 st.title("⚛️ DOST Grants-in-Aid (GIA) Dashboard")
-st.caption("Interactive overview of projects, beneficiaries, agencies, and funding.")
+st.caption("Interactive overview of projects, beneficiaries, agencies, and funding (Year-filtered).")
 
 c1,c2,c3,c4 = st.columns(4)
 c1.metric("Projects", f"{len(fdf):,}")
@@ -130,14 +163,20 @@ c4.metric("Total Funding (₱)", f"{fdf['funding_num'].sum():,.0f}")
 # ----------------------
 # Visualizations
 # ----------------------
-tabs = st.tabs(["Projects per Year", "Funding by KRA", "Top Agencies"])
+tabs = st.tabs(["Projects per Year", "Funding by KRA", "Top Agencies", "Project Timeline"])
 
 with tabs[0]:
-    by_year = fdf.groupby("year").size().reset_index(name="Projects")
+    by_year = (
+        fdf.dropna(subset=["year"])
+           .groupby("year")
+           .size()
+           .reset_index(name="Projects")
+           .sort_values("year")
+    )
     st.altair_chart(
         alt.Chart(by_year).mark_bar().encode(
-            x=alt.X("year:O"),
-            y="Projects:Q",
+            x=alt.X("year:O", title="Year"),
+            y=alt.Y("Projects:Q"),
             tooltip=["year:O","Projects:Q"]
         ).properties(height=300),
         use_container_width=True
@@ -145,30 +184,79 @@ with tabs[0]:
 
 with tabs[1]:
     if "kra" in fdf and "funding_num" in fdf:
-        kdf = fdf.groupby("kra")["funding_num"].sum().reset_index()
+        kdf = (
+            fdf.dropna(subset=["kra"])
+               .groupby("kra")["funding_num"]
+               .sum()
+               .reset_index()
+               .sort_values("funding_num", ascending=False)
+        )
         st.altair_chart(
             alt.Chart(kdf).mark_bar().encode(
-                x=alt.X("kra:N", sort="-y"),
-                y=alt.Y("funding_num:Q", title="₱"),
-                tooltip=["kra:N", alt.Tooltip("funding_num:Q", format=",.0f")]
-            ).properties(height=300),
+                x=alt.X("kra:N", sort="-y", title="KRA"),
+                y=alt.Y("funding_num:Q", title="Funding (₱)"),
+                tooltip=["kra:N", alt.Tooltip("funding_num:Q", format=",.0f", title="₱")]
+            ).properties(height=320),
             use_container_width=True
         )
+    else:
+        st.info("KRA column not found in the dataset.")
 
 with tabs[2]:
     if "implementing_agency" in fdf and "funding_num" in fdf:
-        adf = fdf.groupby("implementing_agency")["funding_num"].sum().reset_index().sort_values("funding_num", ascending=False).head(15)
+        adf = (
+            fdf.dropna(subset=["implementing_agency"])
+               .groupby("implementing_agency")["funding_num"]
+               .sum()
+               .reset_index()
+               .sort_values("funding_num", ascending=False)
+               .head(15)
+        )
         st.altair_chart(
             alt.Chart(adf).mark_bar().encode(
-                x=alt.X("implementing_agency:N", sort="-y"),
-                y=alt.Y("funding_num:Q", title="₱"),
-                tooltip=["implementing_agency:N", alt.Tooltip("funding_num:Q", format=",.0f")]
-            ).properties(height=300),
+                x=alt.X("implementing_agency:N", sort="-y", title="Implementing Agency"),
+                y=alt.Y("funding_num:Q", title="Funding (₱)"),
+                tooltip=["implementing_agency:N", alt.Tooltip("funding_num:Q", format=",.0f", title="₱")]
+            ).properties(height=320),
             use_container_width=True
         )
+    else:
+        st.info("Implementing Agency column not found in the dataset.")
+
+with tabs[3]:
+    if {"project_title","start_dt","end_dt"}.issubset(fdf.columns):
+        tdf = fdf.dropna(subset=["start_dt","end_dt"]).copy()
+        max_rows = st.slider("Max projects to display", 50, 1000, 200, step=50)
+        tdf = tdf.sort_values("start_dt").head(max_rows)
+        tooltip_cols = [c for c in ["project_title","program_title","implementing_agency","kra","start_dt","end_dt","funding_num","status"] if c in tdf.columns]
+        st.altair_chart(
+            alt.Chart(tdf).mark_bar().encode(
+                x=alt.X("start_dt:T", title="Start"),
+                x2=alt.X2("end_dt:T", title="End"),
+                y=alt.Y("project_title:N", sort="-x", title=None),
+                color=alt.Color("kra:N", legend=alt.Legend(title="KRA")) if "kra" in tdf.columns else alt.value("#888"),
+                tooltip=tooltip_cols
+            ).properties(height=min(28*len(tdf), 700)),
+            use_container_width=True
+        )
+    else:
+        st.info("Need `project_title`, `Start`, and `End` to draw the timeline.")
 
 # ----------------------
 # Data Explorer
 # ----------------------
 st.subheader("Data Explorer")
-st.dataframe(fdf, use_container_width=True, hide_index=True)
+show_cols = [c for c in [
+    "program_title","project_title","kra","implementing_agency","beneficiaries",
+    "start","end","status","funding_num","total_project_cost",
+    "year","duration_days","start_dt","end_dt"
+] if c in fdf.columns]
+
+st.dataframe(fdf[show_cols], use_container_width=True, hide_index=True)
+
+st.download_button(
+    "Download filtered CSV",
+    data=fdf[show_cols].to_csv(index=False).encode("utf-8"),
+    file_name="dost_gia_filtered.csv",
+    mime="text/csv",
+)
