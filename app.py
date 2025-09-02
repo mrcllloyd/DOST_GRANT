@@ -23,7 +23,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-# Altair: allow large datasets
 alt.data_transformers.disable_max_rows()
 
 # =========================
@@ -46,9 +45,9 @@ def to_date(x):
 def load_data():
     """
     Expects: data/dost_gia.xlsx with columns:
-      - Program Title, Project Title, Key Result Areas (KRA),
-        Description..., Expected Output..., Implementing Agency, Beneficiaries,
-        Start, End, Status, Total Project Cost, PCAARRD GIA, Year
+      Program Title, Project Title, Key Result Areas (KRA),
+      Description..., Expected Output..., Implementing Agency, Beneficiaries,
+      Start, End, Status, Total Project Cost, PCAARRD GIA, Year
     """
     df = pd.read_excel("data/dost_gia.xlsx").copy()
 
@@ -108,23 +107,30 @@ def load_data():
 # =========================
 df = load_data()
 
-# UI year bounds (enforced) and data-aware min/max inside that window
+# Allowed UI window
 UI_MIN, UI_MAX = 2016, 2024
-data_years = df["year"].dropna().astype(int)
-if data_years.empty:
-    min_year, max_year = UI_MIN, UI_MAX
-else:
-    min_year = max(UI_MIN, int(data_years.min()))
-    max_year = min(UI_MAX, int(data_years.max()))
+
+# All distinct years from data intersected with UI window
+data_years = sorted({int(y) for y in df["year"].dropna().astype(int).tolist() if UI_MIN <= int(y) <= UI_MAX})
+
+# Robust fallbacks:
+# - If none in 2016–2024, still offer the full UI window so app works.
+# - If only one year, use single-value select_slider.
+year_options = data_years if data_years else list(range(UI_MIN, UI_MAX + 1))
 
 st.sidebar.title("Filter")
-if min_year == max_year:
-    # single-year slider when only one year exists
-    selected_year = st.sidebar.slider("Year", min_value=min_year, max_value=max_year, value=min_year)
+if len(year_options) == 1:
+    selected_year = st.sidebar.select_slider("Year", options=year_options, value=year_options[0])
     fdf = df[df["year"] == selected_year].copy()
 else:
-    year_range = st.sidebar.slider("Year", min_value=min_year, max_value=max_year, value=(min_year, max_year))
-    fdf = df[(df["year"].fillna(min_year) >= year_range[0]) & (df["year"].fillna(max_year) <= year_range[1])].copy()
+    # Range select using first and last available options
+    start_year, end_year = year_options[0], year_options[-1]
+    year_range = st.sidebar.select_slider(
+        "Year",
+        options=year_options,
+        value=(start_year, end_year)
+    )
+    fdf = df[(df["year"].fillna(start_year) >= year_range[0]) & (df["year"].fillna(end_year) <= year_range[1])].copy()
 
 # =========================
 # KPIs
@@ -150,11 +156,10 @@ with st.expander("🔎 Quick Insights"):
         total = adf["funding_num"].sum()
         if total > 0:
             adf["cum_share"] = adf["funding_num"].cumsum() / total * 100
+            # Number of agencies to reach ~80%
             cutoff_idx = (adf["cum_share"] >= 80).idxmax()
-            try:
-                top_k = int(adf.loc[cutoff_idx].name) + 1  # display rank count
-            except:
-                top_k = int((adf["cum_share"] >= 80).sum())
+            # idxmax returns positional index; convert to rank count
+            top_k = (adf.index.get_loc(cutoff_idx) + 1) if cutoff_idx in adf.index else min(3, len(adf))
             top_3 = ", ".join(adf.head(3)["implementing_agency"].astype(str).tolist())
             lines.append(f"- Top agencies: {top_3}.")
             lines.append(f"- Approximately **top {top_k} agencies** account for **~80%** of funding.")
@@ -260,7 +265,6 @@ with tabs[3]:
         vals = fdf["beneficiaries"].dropna().astype(str)
         exploded = []
         for v in vals:
-            # split on commas, semicolons, slashes, 'and'
             parts = re.split(r"(?:,|;|/| and )+", v, flags=re.I)
             exploded.extend([p.strip() for p in parts if p and p.strip()])
         if exploded:
